@@ -22,3 +22,4 @@ Thumbs.db
 central_workspace_data/
 central_workspace_data/
 history_file/
+__pycache__/
