@@ -3,3 +3,11 @@ langchain-google-genai
 python-dotenv
 streamlit
 langchain
+langchain-community
+langchain-core
+langchain-text-splitters
+chromadb
+langchain-chroma
+tavily-python
+pydantic
+pydantic-settings

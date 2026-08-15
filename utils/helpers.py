@@ -32,7 +32,7 @@ def normalize_content(content: str) -> str:
 
 def get_llm():
     # Check session state first, then environment
-    api_key = st.session_state.get("google_api_key_input") or os.getenv(
+    api_key = os.getenv(
         "GOOGLE_API_KEY"
     )
 
@@ -41,8 +41,8 @@ def get_llm():
 
     # Assuming MODEL_ID is available in the global scope or imported
     # For now, we'll use a default or assume it's available
-    model_id = st.session_state.get("model_id", "gemini-1.5-flash")
-    temperature = st.session_state.get("temperature", 0.0)
+    model_id = os.getenv("MODEL_ID")
+    temperature = os.getenv("TEMPERATURE")
 
     return ChatGoogleGenerativeAI(
         model=model_id, temperature=temperature, google_api_key=api_key

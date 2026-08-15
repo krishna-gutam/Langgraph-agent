@@ -1,68 +1,56 @@
 import os
-import sys
-import subprocess
 import json
 import uuid
 import sqlite3
-import requests
-from bs4 import BeautifulSoup
-from tavily import TavilyClient
 from pathlib import Path
 import streamlit as st
-from dotenv import load_dotenv
 from streamlit_ace import st_ace
 
-from langchain_core.tools import ToolException
-
-# LangGraph imports
-from langgraph.graph import StateGraph, START, END
+from agent_core import (
+    create_graph,
+    get_llm,
+    sanitize_content,
+)
 from langgraph.checkpoint.sqlite import SqliteSaver
-
-# LangChain imports
-from langchain_core.tools import tool
-from langchain_google_genai import ChatGoogleGenerativeAI
-
-# LangGraph and LangChain imports
-from typing import Annotated, Sequence, TypedDict
-from langgraph.graph.message import add_messages
 from langchain_core.messages import (
     HumanMessage,
-    SystemMessage,
-    ToolMessage,
     AIMessage,
+    ToolMessage,
     RemoveMessage,
     AIMessageChunk,
-    BaseMessage,
 )
 
-from tools.registry import get_tools
 
 
-class AgentState(TypedDict):
-    messages: Annotated[Sequence[BaseMessage], add_messages]
-    
+# We pass `cwd` as an argument so Streamlit caches a SEPARATE database connection per workspace folder
+# --- CENTRALIZED WORKSPACE MANAGEMENT ---
 
 
-# Load environment variables
-load_dotenv()
+def get_central_workspace_path():
+    # Root directory for all agent data
+    root = Path(os.getenv("AGENT_DATA_ROOT")) / "central_workspace_data"
+    # Use current directory name as the unique identifier
+    dir_name = os.path.basename(os.getcwd())
+    path = root / dir_name # e.g., D:\Apps\agent\app\core\central_workspace_data\project_name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
-MODEL_ID = os.getenv("MODEL_ID")
 
-# --- HELPER ---
-def sanitize_content(content) -> str:
-    """Safely extracts a string from LangChain's potential list-based content blocks."""
-    if isinstance(content, str):
-        return content
-    elif isinstance(content, list):
-        extracted = []
-        for block in content:
-            if isinstance(block, str):
-                extracted.append(block)
-            elif isinstance(block, dict) and "text" in block:
-                extracted.append(block["text"])
-        return "\n".join(extracted)
-    return str(content)
+@st.cache_resource
+def get_memory():
+    workspace_data_path = get_central_workspace_path()
+    thread_file = workspace_data_path / ".current_thread.txt"
+    if not thread_file.exists():
+        with open(thread_file, "w") as f:
+            f.write("1")
+    db_path = workspace_data_path / "agent_workspace_memory.db"
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    return SqliteSaver(conn)
 
+
+# Re-fetch memory and compile graph based on the CURRENT working directory
+memory = get_memory()
+app = create_graph(checkpointer=memory)
 
 def estimate_tokens(messages):
     """
@@ -82,138 +70,7 @@ def estimate_tokens(messages):
     total_chars = sum(len(str(m.content)) for m in messages)
     return int(total_chars // 3.675)
 
-def get_llm():
-    # Check session state first, then environment
-    api_key = st.session_state.get("google_api_key_input") or os.getenv(
-        "GOOGLE_API_KEY"
-    )
-
-    if not api_key:
-        return None  # Return None instead of crashing the app
-
-    model_id = st.session_state.get("model_id", MODEL_ID)
-    temperature = st.session_state.get("temperature", 0.0)
-
-    return ChatGoogleGenerativeAI(
-        model=model_id, temperature=temperature, google_api_key=api_key
-    )
-
-# --- CONFIGURATION & GRAPH SETUP ---
-
-DEFAULT_SYSTEM_PROMPT = """You are an expert coding assistant. You help users with coding tasks by reading files, executing commands, editing code, writing new files.
-
-Permission rules:
-- NEVER make changes automatically.
-- Before any action that modifies files, creates files, overwrites files, installs packages, executes scripts, or runs shell/PowerShell commands, first explain:
-  1. What you plan to do
-  2. Why you want to do it
-  3. Which files or commands will be affected
-
-- Ask explicitly for user approval before proceeding.
-- Wait for a clear confirmation such as "yes", "approve", or equivalent before executing any modifying action.
-- If the user has already explicitly authorized a specific action in the current request, you may proceed only with that specific action.
-- If multiple changes are required, summarize all planned changes and request approval once before making them.
-- Be concise in your responses.
-"""
-
-tools = get_tools()
-tools_map = {t.name: t for t in tools}
-
-
-def agent_node(state: AgentState):
-    messages = state["messages"]
-    system_prompt = st.session_state.get("system_prompt", DEFAULT_SYSTEM_PROMPT)
-    sanitized_messages = [SystemMessage(content=system_prompt)]
-    for m in messages:
-        if isinstance(m, AIMessage) and not isinstance(m.content, str):
-            m.content = sanitize_content(m.content)
-        sanitized_messages.append(m)
-
-    llm = get_llm()
-    llm_with_tools = llm.bind_tools(tools)
-    response = llm_with_tools.invoke(sanitized_messages)
-    return {"messages": [response]}
-
-
-def tool_node(state: AgentState):
-    last_message = state["messages"][-1]
-    results = []
-
-
-    for call in last_message.tool_calls:
-        try:
-            tool = tools_map[call["name"]]
-            tool_result = tool.invoke(call["args"])
-            tool_result_str = str(tool_result).strip()
-
-        except Exception as e:
-            tool_result_str = f"Error executing tool: {str(e)}"
-
-        results.append(
-            ToolMessage(
-                content=tool_result_str, tool_call_id=call["id"], name=call["name"]
-            )
-        )
-
-    update = {"messages": results}
-    return update
-
-
-def should_continue(state: AgentState):
-    messages = state.get("messages", [])
-    if not messages:
-        return END
-    last_message = messages[-1]
-    if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-        return "tools"
-    return END
-
-
-# Graph Compilation
-workflow = StateGraph(AgentState)
-workflow.add_node("agent", agent_node)
-workflow.add_node("tools", tool_node)
-workflow.add_edge(START, "agent")
-workflow.add_conditional_edges("agent", should_continue)
-workflow.add_edge("tools", "agent")
-
-
-# We pass `cwd` as an argument so Streamlit caches a SEPARATE database connection per workspace folder
-# --- CENTRALIZED WORKSPACE MANAGEMENT ---
-
-
-def get_central_workspace_path():
-    # Root directory for all agent data
-    root = Path(r"D:\Apps\agent\app\core\central_workspace_data")
-    # Use current directory name as the unique identifier
-    dir_name = os.path.basename(os.getcwd())
-    path = root / dir_name
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-@st.cache_resource
-def get_memory(cwd: str):
-    workspace_data_path = get_central_workspace_path()
-    thread_file = workspace_data_path / ".current_thread.txt"
-    if not thread_file.exists():
-        with open(thread_file, "w") as f:
-            f.write("1")
-    db_path = workspace_data_path / "agent_workspace_memory.db"
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    return SqliteSaver(conn)
-
-
-# Re-fetch memory and compile graph based on the CURRENT working directory
-memory = get_memory(os.getcwd())
-app = workflow.compile(checkpointer=memory, interrupt_before=["tools"])
-
-# --- PROJECT MANAGEMENT ---
-
-HISTORY_FILE = (
-    Path(r"D:\Apps\agent\app\core\history_file")
-    / ".gemini_agent_projects.json"
-)
+HISTORY_FILE = Path(os.getenv("AGENT_DATA_ROOT")) / "history_file" / ".gemini_agent_projects.json"
 
 
 def load_recent_projects():
@@ -502,14 +359,12 @@ snapshot = app.get_state(thread_config)
     tab_edit,
     tab_logs,
     tab_history,
-    tab_settings,
 ) = st.tabs(
     [
         "💬 Chat Interface",
         "📝 Editor",
         "📜 Message Logs",
         "🕒 Manage History",
-        "⚙️ Settings",
     ]
 )
 
@@ -570,50 +425,6 @@ with tab_history:
                     conn.commit()
                     conn.close()
                     st.rerun()
-
-
-with tab_settings:
-    st.subheader("🧠 Context Management")
-
-    # API Call Counter removed
-
-    # API Key configuration
-    st.text_input(
-        "Google API Key",
-        type="password",
-        key="google_api_key_input",
-        help="Enter your Google API Key here if not set in .env",
-    )
-
-    # Model ID configuration
-    st.text_input("Model ID", value=MODEL_ID, key="model_id")
-
-    # Temperature configuration
-    st.slider(
-        "Temperature",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.0,
-        step=0.1,
-        key="temperature",
-    )
-
-    try:
-        state_snapshot = app.get_state(thread_config)
-    except Exception:
-        pass
-
-    st.subheader("📝 System Prompt")
-    if "system_prompt" not in st.session_state:
-        st.session_state.system_prompt = DEFAULT_SYSTEM_PROMPT
-
-    st.text_area(
-        "Edit System Prompt",
-        value=st.session_state.system_prompt,
-        key="system_prompt",
-        height=200,
-        label_visibility="collapsed",
-    )
 
 with tab_logs:
     st.subheader("Full Message History")
