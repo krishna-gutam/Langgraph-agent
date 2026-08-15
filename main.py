@@ -11,6 +11,7 @@ from agent_core import (
     get_llm,
     sanitize_content,
 )
+from overseer import decide_next_step, DEFAULT_MAX_STEPS
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langchain_core.messages import (
     HumanMessage,
@@ -328,6 +329,76 @@ with st.sidebar:
                 if messages_to_remove:
                     app.update_state(thread_config, {"messages": messages_to_remove})
             st.rerun()
+
+    # --- 🎯 OVERSEER (AUTOPILOT) ---
+    with st.container(border=True):
+        st.markdown("**🎯 Overseer**")
+
+        ap = st.session_state.setdefault(
+            "autopilot",
+            {
+                "active": False,
+                "goal": "",
+                "step": 0,
+                "max_steps": DEFAULT_MAX_STEPS,
+                "approve_tools": True,
+                "instructions": [],
+                "last_reason": "",
+                "status": "",
+            },
+        )
+
+        if not ap["active"]:
+            goal_text = st.text_area(
+                "Goal",
+                value=ap["goal"],
+                height=110,
+                placeholder="e.g. Add a --dry-run flag to cli.py and update the README",
+                key="overseer_goal_input",
+            )
+            ap["max_steps"] = st.number_input(
+                "Max steps", min_value=1, max_value=30,
+                value=int(ap["max_steps"]), key="overseer_max_steps",
+            )
+            ap["approve_tools"] = st.checkbox(
+                "Overseer may approve tool calls",
+                value=ap["approve_tools"],
+                help="Off = the Overseer drives the conversation but every tool call still waits for you.",
+                key="overseer_approve_tools",
+            )
+            if st.button("▶️ Start Overseer", use_container_width=True, type="primary"):
+                if goal_text.strip():
+                    ap.update(
+                        active=True,
+                        goal=goal_text.strip(),
+                        step=0,
+                        instructions=[],
+                        last_reason="",
+                        status="Starting...",
+                    )
+                    st.rerun()
+                else:
+                    st.warning("Give it a goal first.")
+        else:
+            st.caption(f"**Goal:** {ap['goal']}")
+            st.progress(
+                min(ap["step"] / max(ap["max_steps"], 1), 1.0),
+                text=f"Step {ap['step']} / {ap['max_steps']}",
+            )
+            if ap["last_reason"]:
+                st.caption(f"_{ap['last_reason']}_")
+            if st.button("⏹️ Stop Overseer", use_container_width=True):
+                ap["active"] = False
+                ap["status"] = "Stopped by user."
+                st.session_state.pop("overseer_pending_prompt", None)
+                st.rerun()
+
+        if ap["status"]:
+            st.caption(ap["status"])
+
+    # The Overseer's tool policy folds into the existing auto-approve flag.
+    if ap["active"] and ap["approve_tools"]:
+        auto_approve = True
 
     with st.container(border=True):
         # st.subheader("🗒️ Collect Your Thoughts")
@@ -669,6 +740,52 @@ with tab_chat:
 
         # Rerun one last time to render the new Agent message
         st.rerun()
+
+    # 4. OVERSEER DRIVER - exactly one action per rerun, never a loop in-script
+    ap = st.session_state.get("autopilot", {})
+    if ap.get("active"):
+        if snapshot.next == ("tools",):
+            # Graph is parked at a tool call. Either auto_approve handled it
+            # above, or we are deliberately waiting on the human.
+            st.info("⏸️ Overseer is waiting for you to approve the tool call above.")
+
+        elif st.session_state.get("overseer_pending_prompt"):
+            pass  # already queued; the input handler below will send it
+
+        elif ap["step"] >= ap["max_steps"]:
+            ap["active"] = False
+            ap["status"] = f"⏹️ Stopped: hit the {ap['max_steps']}-step budget."
+            st.rerun()
+
+        else:
+            with st.chat_message("user", avatar="🎯"):
+                with st.spinner("Overseer is deciding the next step..."):
+                    decision = decide_next_step(
+                        goal=ap["goal"],
+                        messages=graph_messages,
+                        step=ap["step"],
+                        max_steps=ap["max_steps"],
+                        past_instructions=ap["instructions"],
+                    )
+
+            status = decision.get("status", "continue")
+            instruction = (decision.get("instruction") or "").strip()
+
+            if status == "goal_reached":
+                ap["active"] = False
+                ap["status"] = f"✅ Goal reached. {decision.get('assessment', '')}"
+            elif status == "needs_human" or not instruction:
+                ap["active"] = False
+                ap["status"] = f"🙋 Needs you: {instruction or decision.get('assessment', '')}"
+            else:
+                ap["step"] += 1
+                ap["instructions"].append(instruction)
+                ap["last_reason"] = decision.get("reason", "")
+                ap["status"] = ""
+                st.session_state.overseer_pending_prompt = instruction
+
+            st.rerun()
+
 # 3. HANDLE NEW USER INPUT
 # Check if we have a valid LLM setup before allowing input
 current_llm = get_llm()
@@ -685,7 +802,18 @@ if current_llm is None:
 
 else:
     # Normal execution if the key exists
-    if prompt := st.chat_input("What would you like to do?"):
+    typed_prompt = st.chat_input("What would you like to do?")
+
+    # An Overseer instruction is consumed here exactly like typed input.
+    # If the human types during autopilot, the human wins for this turn -
+    # the Overseer simply re-plans on the next cycle from the new state.
+    queued_prompt = st.session_state.pop("overseer_pending_prompt", None)
+    if queued_prompt:
+        queued_prompt = f"🎯 [Overseer] {queued_prompt}"
+
+    prompt = typed_prompt or queued_prompt
+
+    if prompt:
         safe_prompt = sanitize_content(prompt)
 
         with tab_chat:
