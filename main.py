@@ -749,8 +749,6 @@ else:
     # If you type during a run, your message wins for this turn - the
     # Overseer just re-reads the transcript on its next cycle.
     queued = st.session_state.pop("overseer_pending_prompt", None)
-    if queued:
-        queued = f"🎯 [Overseer] {queued}"
 
     prompt = typed_prompt or queued
 
