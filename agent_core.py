@@ -1,3 +1,8 @@
+"""
+NOTE: When implementing automatic function calling (AFC), please use 
+`Chat.send_message` and `Chat.send_message_stream` instead of 
+`Models.generate_content` and `Models.generate_content_stream`.
+"""
 import os
 from typing import Annotated, Sequence, TypedDict
 from langchain_core.messages import (

@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import uuid
 import sqlite3
 from pathlib import Path
@@ -334,19 +335,15 @@ with st.sidebar:
     with st.container(border=True):
         st.markdown("**🎯 Overseer**")
 
-        ap = st.session_state.setdefault(
-            "autopilot",
-            {
-                "active": False,
-                "goal": "",
-                "step": 0,
-                "max_steps": DEFAULT_MAX_STEPS,
-                "approve_tools": True,
-                "instructions": [],
-                "last_reason": "",
-                "status": "",
-            },
-        )
+        ap = st.session_state.setdefault("autopilot", {})
+        # setdefault-per-key so an old session dict doesn't KeyError after upgrade
+        for k, v in {
+            "active": False, "paused": False, "goal": "", "step": 0,
+            "max_steps": DEFAULT_MAX_STEPS, "approve_tools": True, "continue_after_goal": False,
+            "instructions": [], "last_reason": "", "status": "",
+            "pause_reason": "", "started_at": None,
+        }.items():
+            ap.setdefault(k, v)
 
         if not ap["active"]:
             goal_text = st.text_area(
@@ -357,7 +354,8 @@ with st.sidebar:
                 key="overseer_goal_input",
             )
             ap["max_steps"] = st.number_input(
-                "Max steps", min_value=1, max_value=30,
+                "Step limit (0 = run until I stop)",
+                min_value=0, max_value=500,
                 value=int(ap["max_steps"]), key="overseer_max_steps",
             )
             ap["approve_tools"] = st.checkbox(
@@ -366,32 +364,60 @@ with st.sidebar:
                 help="Off = the Overseer drives the conversation but every tool call still waits for you.",
                 key="overseer_approve_tools",
             )
+            ap["continue_after_goal"] = st.checkbox(
+                "Keep working after goal is reached",
+                value=ap["continue_after_goal"],
+                help="On = look for verification / hardening / follow-up work instead of pausing. "
+                     "Off = pause and wait for you when the goal looks done.",
+                key="overseer_continue_after_goal",
+            )
             if st.button("▶️ Start Overseer", use_container_width=True, type="primary"):
                 if goal_text.strip():
                     ap.update(
-                        active=True,
-                        goal=goal_text.strip(),
-                        step=0,
-                        instructions=[],
-                        last_reason="",
-                        status="Starting...",
+                        active=True, paused=False, goal=goal_text.strip(), step=0,
+                        instructions=[], last_reason="", status="",
+                        pause_reason="", started_at=time.time(),
                     )
                     st.rerun()
                 else:
                     st.warning("Give it a goal first.")
         else:
             st.caption(f"**Goal:** {ap['goal']}")
-            st.progress(
-                min(ap["step"] / max(ap["max_steps"], 1), 1.0),
-                text=f"Step {ap['step']} / {ap['max_steps']}",
-            )
-            if ap["last_reason"]:
-                st.caption(f"_{ap['last_reason']}_")
-            if st.button("⏹️ Stop Overseer", use_container_width=True):
-                ap["active"] = False
-                ap["status"] = "Stopped by user."
-                st.session_state.pop("overseer_pending_prompt", None)
-                st.rerun()
+
+            elapsed = int(time.time() - (ap["started_at"] or time.time()))
+            mins, secs = divmod(elapsed, 60)
+            if ap["max_steps"]:
+                st.progress(
+                    min(ap["step"] / ap["max_steps"], 1.0),
+                    text=f"Step {ap['step']} / {ap['max_steps']}  ·  {mins}m {secs}s",
+                )
+            else:
+                st.caption(f"♾️ Step {ap['step']}  ·  running {mins}m {secs}s  ·  no step limit")
+
+            if ap["paused"]:
+                st.warning(f"⏸️ **Paused.** {ap['pause_reason']}")
+                c1, c2 = st.columns(2)
+                if c1.button("▶️ Resume", use_container_width=True):
+                    ap["paused"] = False
+                    ap["pause_reason"] = ""
+                    st.rerun()
+                if c2.button("⏹️ Stop", use_container_width=True):
+                    ap.update(active=False, paused=False, status="Stopped by user.")
+                    st.session_state.pop("overseer_pending_prompt", None)
+                    st.rerun()
+                with st.popover("🎯 Change goal", use_container_width=True):
+                    revised = st.text_area("New goal", value=ap["goal"], key="overseer_revise_goal")
+                    if st.button("Set goal & resume"):
+                        if revised.strip():
+                            ap.update(goal=revised.strip(), paused=False, pause_reason="")
+                            st.rerun()
+            else:
+                if ap["last_reason"]:
+                    st.caption(f"_{ap['last_reason']}_")
+                if st.button("⏹️ Stop Overseer", use_container_width=True):
+                    ap.update(active=False, paused=False, status="Stopped by user.")
+                    st.session_state.pop("overseer_pending_prompt", None)
+                    st.rerun()
 
         if ap["status"]:
             st.caption(ap["status"])
@@ -741,20 +767,29 @@ with tab_chat:
         # Rerun one last time to render the new Agent message
         st.rerun()
 
-    # 4. OVERSEER DRIVER - exactly one action per rerun, never a loop in-script
+    # 4. OVERSEER DRIVER - one action per rerun, never a loop in-script.
+    #    The Overseer never deactivates itself; it only pauses. Only the
+    #    Stop button in the sidebar ends a run.
     ap = st.session_state.get("autopilot", {})
-    if ap.get("active"):
+    if ap.get("active") and not ap.get("paused"):
+
+        def _pause(reason):
+            ap["paused"] = True
+            ap["pause_reason"] = reason
+            st.session_state.pop("overseer_pending_prompt", None)
+
+        def _normalise(text):
+            return " ".join(str(text).lower().split())
+
         if snapshot.next == ("tools",):
-            # Graph is parked at a tool call. Either auto_approve handled it
-            # above, or we are deliberately waiting on the human.
+            # Parked at a tool call: either auto_approve fired above, or we wait.
             st.info("⏸️ Overseer is waiting for you to approve the tool call above.")
 
         elif st.session_state.get("overseer_pending_prompt"):
             pass  # already queued; the input handler below will send it
 
-        elif ap["step"] >= ap["max_steps"]:
-            ap["active"] = False
-            ap["status"] = f"⏹️ Stopped: hit the {ap['max_steps']}-step budget."
+        elif ap["max_steps"] and ap["step"] >= ap["max_steps"]:
+            _pause(f"Hit the {ap['max_steps']}-step limit. Resume to keep going.")
             st.rerun()
 
         else:
@@ -764,27 +799,41 @@ with tab_chat:
                         goal=ap["goal"],
                         messages=graph_messages,
                         step=ap["step"],
-                        max_steps=ap["max_steps"],
+                        max_steps=ap["max_steps"] or None,
                         past_instructions=ap["instructions"],
+                        allow_extension=ap["continue_after_goal"],
                     )
 
             status = decision.get("status", "continue")
             instruction = (decision.get("instruction") or "").strip()
 
             if status == "goal_reached":
-                ap["active"] = False
-                ap["status"] = f"✅ Goal reached. {decision.get('assessment', '')}"
+                _pause(f"✅ Goal looks reached. {decision.get('assessment', '')}")
+
             elif status == "needs_human" or not instruction:
-                ap["active"] = False
-                ap["status"] = f"🙋 Needs you: {instruction or decision.get('assessment', '')}"
+                _pause(f"🙋 {instruction or decision.get('assessment', 'No instruction produced.')}")
+
             else:
-                ap["step"] += 1
-                ap["instructions"].append(instruction)
-                ap["last_reason"] = decision.get("reason", "")
-                ap["status"] = ""
-                st.session_state.overseer_pending_prompt = instruction
+                # Loop guard: an unbounded run must not ping-pong forever.
+                recent = [_normalise(i) for i in ap["instructions"][-2:]]
+                if len(recent) == 2 and all(r == _normalise(instruction) for r in recent):
+                    _pause(
+                        "🔁 The Overseer is repeating the same instruction. "
+                        "The coding agent is probably stuck - try steering it yourself, "
+                        "then Resume."
+                    )
+                else:
+                    ap["step"] += 1
+                    ap["instructions"].append(instruction)
+                    ap["last_reason"] = decision.get("reason", "")
+                    ap["status"] = ""
+                    st.session_state.overseer_pending_prompt = instruction
 
             st.rerun()
+
+    elif ap.get("active") and ap.get("paused"):
+        st.info(f"⏸️ **Overseer paused.** {ap.get('pause_reason', '')} "
+                "Reply in the chat below if it asked you something, then hit Resume in the sidebar.")
 
 # 3. HANDLE NEW USER INPUT
 # Check if we have a valid LLM setup before allowing input

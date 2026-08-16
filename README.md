@@ -8,6 +8,6 @@ This project is a modular LangGraph-based agent designed for various tasks.
 - `tools/`: Contains various tools used by the agent, including `bash_exec`.
 - `utils/`: Helper functions.
 
-## Setup
-1. Install dependencies: `pip install -r requirements.txt`
-2. Run the agent: `streamlit run codingagent2.py`
+## Best Practices
+- **Automatic Function Calling (AFC):** When implementing automatic function calling, please use `Chat.send_message` and `Chat.send_message_stream` instead of `Models.generate_content` and `Models.generate_content_stream`. Direct use of the latter is discouraged.
+
