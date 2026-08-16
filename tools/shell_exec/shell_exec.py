@@ -34,52 +34,36 @@ def run_bash(script: str, justification: str) -> str:
     venv_unix = os.path.join(venv_dir, "bin")
     venv_win = os.path.join(venv_dir, "Scripts")  # Git Bash / MSYS on Windows
 
-    # 1. Create the .venv if it doesn't exist
-    if not os.path.isdir(venv_dir):
-        try:
-            subprocess.run(
-                [sys.executable, "-m", "venv", ".venv"],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except subprocess.CalledProcessError as e:
-            detail = (e.stderr or e.stdout or "").strip() or str(e)
-            return f"Error: Failed to automatically create a '.venv'.\n{detail}"
+    prelude = ["set -euo pipefail"]
 
-    # 2. Locate the interpreter and pip explicitly
-    if os.path.isdir(venv_unix):
-        active_venv = venv_unix
-    elif os.path.isdir(venv_win):
-        active_venv = venv_win
-    else:
-        return "Error: Virtual environment created, but binary folders are missing."
+    # Only use .venv if it is already present
+    if os.path.isdir(venv_dir):
+        if os.path.isdir(venv_unix):
+            active_venv = venv_unix
+        elif os.path.isdir(venv_win):
+            active_venv = venv_win
+        else:
+            active_venv = None
 
-    python_exe = _find_binary(active_venv, ["python", "python3", "python.exe"])
-    pip_exe = _find_binary(active_venv, ["pip", "pip3", "pip.exe"])
+        if active_venv:
+            python_exe = _find_binary(active_venv, ["python", "python3", "python.exe"])
+            pip_exe = _find_binary(active_venv, ["pip", "pip3", "pip.exe"])
 
-    if not python_exe or not pip_exe:
-        return (
-            f"Error: '.venv' is incomplete — could not locate "
-            f"{'python' if not python_exe else 'pip'} in {active_venv}."
-        )
+            if python_exe and pip_exe:
+                q = shlex.quote
+                prelude = [
+                    "set -euo pipefail",
+                    f"export VIRTUAL_ENV={q(venv_dir)}",
+                    f"export PATH={q(active_venv)}:$PATH",
+                    "unset PYTHONHOME",
+                    f"python() {{ command {q(python_exe)} \"$@\"; }}",
+                    f"python3() {{ command {q(python_exe)} \"$@\"; }}",
+                    f"pip() {{ command {q(pip_exe)} \"$@\"; }}",
+                    f"pip3() {{ command {q(pip_exe)} \"$@\"; }}",
+                    "export -f python python3 pip pip3",
+                    "hash -r",
+                ]
 
-    # 3. ZERO-FALLBACK ENFORCEMENT:
-    # Aliases are ignored in non-interactive bash, so shadow python/pip with
-    # exported functions. `set -e` makes any failure hard-crash the script.
-    q = shlex.quote
-    prelude = [
-        "set -euo pipefail",
-        f"export VIRTUAL_ENV={q(venv_dir)}",
-        f"export PATH={q(active_venv)}:$PATH",
-        "unset PYTHONHOME",
-        f"python() {{ command {q(python_exe)} \"$@\"; }}",
-        f"python3() {{ command {q(python_exe)} \"$@\"; }}",
-        f"pip() {{ command {q(pip_exe)} \"$@\"; }}",
-        f"pip3() {{ command {q(pip_exe)} \"$@\"; }}",
-        "export -f python python3 pip pip3",
-        "hash -r",
-    ]
     injected_script = "\n".join(prelude) + "\n" + script
 
     try:

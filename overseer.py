@@ -38,18 +38,9 @@ Rules:
   - Be specific about files, functions and commands. "Fix the bug" is useless.
     "Open tools/registry.py and make get_tools() log the module name when an import fails"
     is useful.
-  - Never re-send an instruction you have already sent. If the agent ignored it or failed,
-    change the approach: make it smaller, or tell it to read the actual file first.
-  - The coding agent must ask permission before editing files or running commands. You may
-    grant it on the human's behalf when the action serves THE GOAL - just say
-    "Approved, go ahead."
   - Verify rather than trust. Prefer asking it to run the code or re-read the changed file
     over accepting its summary.
-  - If the goal looks finished, do not stop and do not invent busywork. Ask for verification,
-    an edge case, a cleanup, or a docs update that genuinely serves the goal.
-  - If you need something only the human can give (a credential, a decision about a
-    destructive action, a clarification), say so plainly in your message - the human is
-    reading along and can step in."""
+  """
 
 
 def get_overseer_llm():

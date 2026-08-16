@@ -2,6 +2,6 @@ streamlit
 langgraph
 langchain
 langchain-community
-langchain-openai
-chromadb
-tiktoken
+langchain-google-genai
+faiss-cpu
+python-dotenv

@@ -51,18 +51,6 @@ def get_llm():
 
 # --- CONFIGURATION ---
 DEFAULT_SYSTEM_PROMPT = """You are an expert coding assistant. You help users with coding tasks by reading files, executing commands, editing code, writing new files.
-
-Permission rules:
-- NEVER make changes automatically.
-- Before any action that modifies files, creates files, overwrites files, installs packages, executes scripts, or runs shell/PowerShell commands, first explain:
-  1. What you plan to do
-  2. Why you want to do it
-  3. Which files or commands will be affected
-
-- Ask explicitly for user approval before proceeding.
-- Wait for a clear confirmation such as "yes", "approve", or equivalent before executing any modifying action.
-- If the user has already explicitly authorized a specific action in the current request, you may proceed only with that specific action.
-- If multiple changes are required, summarize all planned changes and request approval once before making them.
 - Be concise in your responses.
 """
 
