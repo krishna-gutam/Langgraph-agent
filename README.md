@@ -73,3 +73,10 @@ The **Overseer** is a meta-agent designed to steer the coding agent without bein
 *   **Safety**: It is programmed to avoid repeating instructions and to verify results before declaring victory.
 
 
+
+## 🧪 Running Tests
+
+To run the test suite and verify core functionality, tool registration, and CLI behavior:
+```bash
+PYTHONPATH=. pytest
+```
