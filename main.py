@@ -13,6 +13,7 @@ from agent_core import (
 )
 from overseer import next_instruction
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langchain_core.messages import (
     HumanMessage,
     AIMessage,
@@ -141,6 +142,25 @@ def switch_thread(tid):
     st.session_state.thread_id = tid
     # LangGraph automatically initializes empty states for new thread_ids when the graph is invoked.
     st.rerun()
+
+
+def reset_overseer():
+    """
+    Stop autopilot and drop any queued instruction.
+
+    Must be called BEFORE any destructive edit to the message history.
+    Otherwise the Overseer sees an empty transcript on the next rerun,
+    writes a fresh instruction, and the bottom of this script immediately
+    feeds it back into the graph - so the history refills before the user
+    ever sees it cleared.
+
+    Instructions and step count are reset too: an Overseer that keeps its
+    own instruction log while the coding agent's transcript is empty will
+    send step N+1 to an agent that has no memory of steps 1..N.
+    """
+    st.session_state.pop("overseer_pending_prompt", None)
+    ap = st.session_state.setdefault("autopilot", {})
+    ap.update(active=False, step=0, instructions=[])
 
 
 def switch_workspace_environment():
@@ -293,6 +313,7 @@ with st.sidebar:
                 ]
 
                 if messages_to_remove:
+                    reset_overseer()
                     app.update_state(thread_config, {"messages": messages_to_remove})
                     st.rerun()
 
@@ -310,24 +331,19 @@ with st.sidebar:
                     if msg.id
                 ]
                 if messages_to_remove:
+                    reset_overseer()
                     app.update_state(thread_config, {"messages": messages_to_remove})
                     st.rerun()
 
         if st.button("🗑️ Clear Chat History", use_container_width=True):
-            current_state = app.get_state(thread_config)  #
-            state_messages = current_state.values.get("messages", [])
-            human_indices = [
-                i for i, m in enumerate(state_messages) if isinstance(m, HumanMessage)
-            ]
-            if human_indices:
-                target_idx = human_indices[0]
-                messages_to_remove = [
-                    RemoveMessage(id=msg.id)
-                    for msg in state_messages[target_idx:]
-                    if msg.id
-                ]
-                if messages_to_remove:
-                    app.update_state(thread_config, {"messages": messages_to_remove})
+            # Stop autopilot FIRST, or it refills the transcript on the next rerun.
+            reset_overseer()
+            # REMOVE_ALL_MESSAGES wipes the whole list. Slicing from the first
+            # HumanMessage left anything before it (or any message with no .id)
+            # behind, so "clear" was not always a full clear.
+            app.update_state(
+                thread_config, {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES)]}
+            )
             st.rerun()
 
     # --- 🎯 OVERSEER ---
@@ -477,6 +493,10 @@ with tab_logs:
         with col2:
             if st.button("🗑️", key=f"del_{i}"):
                 if msg.id:
+                    # Hand-editing the transcript is a human intervention, so
+                    # stop autopilot rather than letting it react to a history
+                    # the user is still in the middle of changing.
+                    reset_overseer()
                     app.update_state(
                         thread_config, {"messages": [RemoveMessage(id=msg.id)]}
                     )
