@@ -8,7 +8,7 @@ A powerful, modular, and autonomous AI coding assistant built with **LangGraph**
 *   **CLI Interface**: A lightweight, terminal-based interface for quick tasks.
 *   **Overseer (Autopilot) Mode**: A meta-agent that acts as a proxy for the user. It plans, steers, and verifies the coding agent's work toward a specific goal, pausing only when human intervention is required.
 *   **Sophisticated Tooling**:
-    *   **`apply_patch`**: A robust, fuzzy-matching file editor that handles indentation and whitespace variations gracefully.
+    *   **`apply_patch`**: A robust, fuzzy-matching file editor that handles indentation and whitespace variations gracefully using a 9-tier strategy.
     *   **`run_bash`**: A secure, environment-aware bash executor that automatically manages a project-specific `.venv`.
     *   **`web_search` & `web_fetch`**: Integrated research capabilities using Tavily and BeautifulSoup.
 *   **Persistent Memory**: Uses SQLite to maintain conversation state across sessions.
@@ -56,7 +56,7 @@ python cli.py
 
 | Tool | Description |
 | :--- | :--- |
-| `apply_patch` | Edits files using an 8-tier fuzzy matching strategy to ensure accurate code replacement. |
+| `apply_patch` | Edits files using a 9-tier fuzzy matching strategy to ensure accurate code replacement. |
 | `run_bash` | Executes shell commands in a sandboxed, auto-managed virtual environment. |
 | `web_search` | Performs advanced web searches via Tavily. |
 | `web_fetch` | Scrapes and cleans text content from URLs. |
